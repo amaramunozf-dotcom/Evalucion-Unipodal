@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Evaluación Bioinstrumental - Apoyo Unipodal</title>
+  <!-- Tailwind CSS para diseño -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- MediaPipe Pose y Camera Utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+  <!-- Chart.js para visualización de gráficos -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    .canvas-overlay { position: absolute; top: 0; left: 0; transform: scaleX(-1); }
+    .video-flip { transform: scaleX(-1); }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen p-6 font-sans">
+  <div class="max-w-6xl mx-auto space-y-6">
+    
+    <!-- Encabezado -->
+    <header class="border-b border-slate-700 pb-4 flex justify-between items-center">
+      <div>
+        <h1 class="text-2xl font-bold text-teal-400">Evaluación de Estabilidad Unipodal</h1>
+        <p class="text-sm text-slate-400">Análisis Bioinstrumental - Universidad de Chile</p>
+      </div>
+      <div id="statusBadge" class="bg-amber-500/20 text-amber-300 px-4 py-2 rounded-lg font-medium border border-amber-500/30">
+        Estado: Ajustando Línea Media
+      </div>
+    </header>
+
+    <!-- Panel Principal -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      
+      <!-- Video y Canvas -->
+      <div class="lg:col-span-2 bg-slate-800 p-4 rounded-xl relative border border-slate-700">
+        <h2 class="text-lg font-semibold mb-2 text-slate-200">Camara en Vivo & Tracking</h2>
+        <div class="relative aspect-video bg-black rounded-lg overflow-hidden flex items-center justify-center">
+          <video id="webcam" class="w-full h-full object-cover video-flip" autoplay playsinline muted></video>
+          <canvas id="outputCanvas" class="w-full h-full canvas-overlay"></canvas>
+        </div>
+        <p class="text-xs text-slate-400 mt-2">Instrucción: Manténgase erguido para fijar la línea media. Levante la **mano derecha** para iniciar el conteo.</p>
+      </div>
+
+      <!-- Métricas y Control -->
+      <div class="space-y-4">
+        
+        <!-- Tarjetas de Variables -->
+        <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-4">
+          <h2 class="text-lg font-semibold text-slate-200">Métricas en Tiempo Real</h2>
+          
+          <div class="bg-slate-900/80 p-4 rounded-lg border border-slate-700">
+            <span class="text-xs uppercase tracking-wider text-slate-400">Tiempo Unipodal</span>
+            <div id="timerText" class="text-4xl font-mono font-bold text-teal-400 mt-1">00.0 s</div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div class="bg-slate-900/80 p-3 rounded-lg border border-slate-700">
+              <span class="text-xs text-slate-400">Desviación Actual</span>
+              <div id="currentDev" class="text-xl font-mono font-semibold text-slate-100 mt-1">0.00 px</div>
+            </div>
+            <div class="bg-slate-900/80 p-3 rounded-lg border border-slate-700">
+              <span class="text-xs text-slate-400">Oscilación RMS</span>
+              <div id="rmsDev" class="text-xl font-mono font-semibold text-teal-300 mt-1">0.00 px</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Botones de Control -->
+        <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 flex gap-3">
+          <button id="btnReset" class="flex-1 bg-slate-700 hover:bg-slate-600 font-semibold py-2 px-4 rounded-lg transition">
+            Re-calibrar Línea
+          </button>
+          <button id="btnStop" class="flex-1 bg-rose-600 hover:bg-rose-500 font-semibold py-2 px-4 rounded-lg transition">
+            Finalizar Test
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Gráfica de Oscilaciones -->
+    <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
+      <h2 class="text-lg font-semibold mb-2 text-slate-200">Desplazamiento Postural Lateral ($\Delta X$)</h2>
+      <div class="h-48">
+        <canvas id="chartOscilacion"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const videoElement = document.getElementById('webcam');
+    const canvasElement = document.getElementById('outputCanvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const statusBadge = document.getElementById('statusBadge');
+    const timerText = document.getElementById('timerText');
+    const currentDevText = document.getElementById('currentDev');
+    const rmsDevText = document.getElementById('rmsDev');
+
+    let baselineX = null;
+    let isTesting = false;
+    let startTime = 0;
+    let timerInterval = null;
+    let deviations = [];
+    let chartInstance = null;
+
+    // Inicializar Gráfico Chart.js
+    const ctxChart = document.getElementById('chartOscilacion').getContext('2d');
+    chartInstance = new Chart(ctxChart, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'Desviación Lateral (px)',
+          data: [],
+          borderColor: '#2dd4bf',
+          borderWidth: 2,
+          fill: false,
+          tension: 0.1,
+          pointRadius: 0
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          x: { title: { display: true, text: 'Tiempo (s)' }, grid: { color: '#334155' } },
+          y: { title: { display: true, text: 'Desviación (px)' }, grid: { color: '#334155' } }
+        }
+      }
+    });
+
+    // Procesamiento con MediaPipe Pose
+    const pose = new Pose({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+    });
+
+    pose.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    pose.onResults(onResults);
+
+    function onResults(results) {
+      canvasElement.width = videoElement.videoWidth;
+      canvasElement.height = videoElement.videoHeight;
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+      if (!results.poseLandmarks) {
+        canvasCtx.restore();
+        return;
+      }
+
+      const lm = results.poseLandmarks;
+      
+      // Calcular punto medio del tronco (promedio hombros y caderas)
+      const rightShoulder = lm[12], leftShoulder = lm[11];
+      const rightHip = lm[24], leftHip = lm[23];
+      const rightWrist = lm[16];
+
+      const currentXNormalized = (rightShoulder.x + leftShoulder.x + rightHip.x + leftHip.x) / 4;
+      const currentX = currentXNormalized * canvasElement.width;
+
+      // Fase 1: Calibración / Definición de Línea Media
+      if (!isTesting) {
+        baselineX = currentX;
+        statusBadge.innerText = "Estado: Listo para Señal (Levante Mano Der)";
+        statusBadge.className = "bg-amber-500/20 text-amber-300 px-4 py-2 rounded-lg font-medium border border-amber-500/30";
+
+        // Detección de Señal: Mano derecha levantada por sobre el hombro derecho
+        if (rightWrist.y < rightShoulder.y && rightWrist.visibility > 0.6) {
+          startTest();
+        }
+      }
+
+      // Dibujar Línea Media Estable (Referencia Inicial)
+      if (baselineX !== null) {
+        canvasCtx.beginPath();
+        canvasCtx.setLineDash([6, 6]);
+        canvasCtx.moveTo(baselineX, 0);
+        canvasCtx.lineTo(baselineX, canvasElement.height);
+        canvasCtx.strokeStyle = '#38bdf8';
+        canvasCtx.lineWidth = 3;
+        canvasCtx.stroke();
+        canvasCtx.setLineDash([]);
+      }
+
+      // Dibujar Línea Corporal Actual
+      canvasCtx.beginPath();
+      canvasCtx.moveTo(currentX, 0);
+      canvasCtx.lineTo(currentX, canvasElement.height);
+      canvasCtx.strokeStyle = isTesting ? '#f43f5e' : '#a855f7';
+      canvasCtx.lineWidth = 2;
+      canvasCtx.stroke();
+
+      // Fase 2: Medición y Oscilaciones
+      if (isTesting) {
+        const dev = currentX - baselineX;
+        deviations.push(dev);
+        const timeElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+        currentDevText.innerText = `${dev.toFixed(1)} px`;
+        
+        // Cálculo RMS
+        const sumSquare = deviations.reduce((acc, v) => acc + (v * v), 0);
+        const rms = Math.sqrt(sumSquare / deviations.length);
+        rmsDevText.innerText = `${rms.toFixed(1)} px`;
+
+        // Actualizar Gráfico
+        if (deviations.length % 3 === 0) {
+          chartInstance.data.labels.push(timeElapsed);
+          chartInstance.data.datasets[0].data.push(dev.toFixed(2));
+          chartInstance.update('none');
+        }
+      }
+
+      canvasCtx.restore();
+    }
+
+    function startTest() {
+      isTesting = true;
+      startTime = Date.now();
+      deviations = [];
+      chartInstance.data.labels = [];
+      chartInstance.data.datasets[0].data = [];
+      
+      statusBadge.innerText = "Estado: Medición Unipodal en Curso";
+      statusBadge.className = "bg-emerald-500/20 text-emerald-300 px-4 py-2 rounded-lg font-medium border border-emerald-500/30";
+
+      timerInterval = setInterval(() => {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        timerText.innerText = `${elapsed} s`;
+      }, 100);
+    }
+
+    function stopTest() {
+      if (!isTesting) return;
+      isTesting = false;
+      clearInterval(timerInterval);
+      statusBadge.innerText = "Estado: Evaluación Finalizada";
+      statusBadge.className = "bg-slate-700 text-slate-300 px-4 py-2 rounded-lg font-medium border border-slate-600";
+    }
+
+    document.getElementById('btnReset').addEventListener('click', () => {
+      stopTest();
+      baselineX = null;
+      timerText.innerText = "00.0 s";
+      currentDevText.innerText = "0.00 px";
+      rmsDevText.innerText = "0.00 px";
+    });
+
+    document.getElementById('btnStop').addEventListener('click', stopTest);
+
+    // Inicializar cámara
+    const camera = new Camera(videoElement, {
+      onFrame: async () => { await pose.send({ image: videoElement }); },
+      width: 1280,
+      height: 720
+    });
+    camera.start();
+  </script>
+</body>
+</html>
